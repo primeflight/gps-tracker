@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GPS Neo-6M — Real-time Tracking</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0a0a0f;color:#eee;font-family:system-ui;
+       display:flex;flex-direction:column;align-items:center;min-height:100vh;padding:16px}
+  h1{font-size:16px;color:#4cf;margin-bottom:8px;letter-spacing:2px;font-weight:600}
+  #status{display:flex;align-items:center;gap:6px;margin-bottom:12px;font-size:12px;color:#889}
+  #dot{width:8px;height:8px;border-radius:50%;background:#fa5;transition:all .3s}
+  #dot.ok{background:#4f4;box-shadow:0 0 6px #4f4}
+  #dot.erro{background:#f44;box-shadow:0 0 6px #f44}
+  #container{display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap;justify-content:center}
+  #map{background:#000;border-radius:6px;box-shadow:0 0 20px #4cf2}
+  #dados{background:#111;padding:14px;border-radius:8px;min-width:200px;border:1px solid #222}
+  .coord{font-size:14px;font-family:monospace;color:#4cf;margin:4px 0}
+  .lbl{color:#889;font-size:11px;margin:3px 0}
+  .valor{color:#eee;font-family:monospace}
+  #fix{font-size:18px;font-weight:700;margin:6px 0}
+  .fix-ok{color:#4f4}
+  .fix-no{color:#f44}
+  button{background:#4cf;color:#000;border:0;padding:6px 14px;border-radius:5px;
+         font-size:12px;cursor:pointer;margin-top:8px;font-weight:600}
+  button:hover{background:#6df}
+</style>
+</head>
+<body>
+<h1>GPS NEO-6M TRACKER</h1>
+<div id="status"><div id="dot"></div><span id="txt">Disconnected</span></div>
+<div id="container">
+  <canvas id="map" width="400" height="300"></canvas>
+  <div id="dados">
+    <div id="fix" class="fix-no">NO FIX</div>
+    <div class="coord" id="lat">Lat: --</div>
+    <div class="coord" id="lon">Lon: --</div>
+    <div class="lbl">Altitude: <span class="valor" id="alt">--</span> m</div>
+    <div class="lbl">Speed: <span class="valor" id="spd">--</span> km/h</div>
+    <div class="lbl">Satellites: <span class="valor" id="sat">--</span></div>
+    <div class="lbl">HDOP: <span class="valor" id="hdop">--</span></div>
+    <div class="lbl">Date: <span class="valor" id="date">--</span></div>
+    <div class="lbl">Time: <span class="valor" id="time">--</span></div>
+    <button id="btn">Connect</button>
+  </div>
+</div>
+
+<script>
+const cv = document.getElementById('map'), ctx = cv.getContext('2d');
+const cx = 200, cy = 150, scale = 50000; // pixels per degree
+let port = null, reader = null;
+let track = [];
+
+function draw(lat, lon, fix) {
+  ctx.clearRect(0, 0, 400, 300);
+
+  // Grid
+  ctx.strokeStyle = '#222'; ctx.lineWidth = 1;
+  for (let i = 0; i < 400; i += 40) {
+    ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, 300); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(400, i); ctx.stroke();
+  }
+
+  // Center cross
+  ctx.strokeStyle = '#4cf'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(cx-10, cy); ctx.lineTo(cx+10, cy); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx, cy-10); ctx.lineTo(cx, cy+10); ctx.stroke();
+
+  if (fix && lat && lon) {
+    // Add to track
+    track.push({lat, lon});
+    if (track.length > 100) track.shift();
+
+    // Draw track
+    if (track.length > 1) {
+      ctx.strokeStyle = '#4f4'; ctx.lineWidth = 2;
+      ctx.beginPath();
+      const first = track[0];
+      ctx.moveTo(cx + (first.lon - lon) * scale, cy - (first.lat - lat) * scale);
+      for (let i = 1; i < track.length; i++) {
+        const p = track[i];
+        ctx.lineTo(cx + (p.lon - lon) * scale, cy - (p.lat - lat) * scale);
+      }
+      ctx.stroke();
+    }
+
+    // Current position
+    ctx.fillStyle = '#f44';
+    ctx.beginPath(); ctx.arc(cx, cy, 6, 0, 7); ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(cx, cy, 8, 0, 7); ctx.stroke();
+  }
+
+  // Scale text
+  ctx.fillStyle = '#889'; ctx.font = '11px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('Scale: ~' + (40/scale*111320).toFixed(1) + 'm per grid', 10, 290);
+}
+
+async function conectar() {
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 9600 });
+    document.getElementById('dot').className = 'ok';
+    document.getElementById('txt').textContent = 'Connected';
+    document.getElementById('btn').textContent = 'Disconnect';
+    lerDados();
+  } catch (e) {
+    document.getElementById('dot').className = 'erro';
+    document.getElementById('txt').textContent = 'Error: ' + e.message;
+  }
+}
+
+async function lerDados() {
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (port.readable) {
+    reader = port.readable.getReader();
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value);
+        let idx;
+        while ((idx = buffer.indexOf('\n')) >= 0) {
+          const linha = buffer.slice(0, idx).trim();
+          buffer = buffer.slice(idx + 1);
+          if (linha.startsWith('{')) {
+            try {
+              const d = JSON.parse(linha);
+              if (d.status) {
+                document.getElementById('txt').textContent = d.status;
+              } else {
+                draw(d.lat, d.lon, d.fix);
+                document.getElementById('lat').textContent = 'Lat: ' + d.lat.toFixed(6);
+                document.getElementById('lon').textContent = 'Lon: ' + d.lon.toFixed(6);
+                document.getElementById('alt').textContent = d.alt.toFixed(1);
+                document.getElementById('spd').textContent = d.spd.toFixed(1);
+                document.getElementById('sat').textContent = d.sat;
+                document.getElementById('hdop').textContent = d.hdop.toFixed(1);
+                document.getElementById('date').textContent = d.date;
+                document.getElementById('time').textContent = d.time;
+                const fixEl = document.getElementById('fix');
+                if (d.fix) {
+                  fixEl.textContent = 'FIX OK';
+                  fixEl.className = 'fix-ok';
+                } else {
+                  fixEl.textContent = 'NO FIX';
+                  fixEl.className = 'fix-no';
+                }
+              }
+            } catch(e) {}
+          }
+        }
+      }
+    } catch(e) {} finally { reader.releaseLock(); }
+  }
+}
+
+document.getElementById('btn').onclick = async () => {
+  if (port) {
+    if (reader) await reader.cancel();
+    await port.close();
+    port = null;
+    document.getElementById('dot').className = '';
+    document.getElementById('txt').textContent = 'Disconnected';
+    document.getElementById('btn').textContent = 'Connect';
+  } else {
+    conectar();
+  }
+};
+
+draw(0, 0, 0);
+</script>
+</body>
+</html>
